@@ -1,5 +1,6 @@
 package com.arnau478.lox;
 
+@SuppressWarnings("serial")
 class RuntimeError extends RuntimeException {
 	final Token token;
 	

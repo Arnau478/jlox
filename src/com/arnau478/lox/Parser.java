@@ -1,14 +1,13 @@
 package com.arnau478.lox;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-
-import com.arnau478.lox.Expr.Binary;
-import com.arnau478.lox.Expr.Literal;
 
 import static com.arnau478.lox.TokenType.*;
 
 public class Parser {
+	@SuppressWarnings("serial")
 	private static class ParseError extends RuntimeException {}
 	
 	private final List<Token> tokens;
@@ -21,16 +20,129 @@ public class Parser {
 	List<Stmt> parse() {
 		List<Stmt> statements = new ArrayList<>();
 		while(!isAtEnd()) {
-			statements.add(statement());
+			statements.add(declaration());
 		}
 		
 		return statements;
 	}
 	
+	private Stmt declaration() {
+		try {
+
+			if(match(CLASS)) return classDeclaration();
+			if(match(FUN)) return function("function");
+			if(match(VAR)) return varDeclaration();
+			
+			return statement();
+		}
+		catch(ParseError error) {
+			synchronize();
+			return null;
+		}
+	}
+	
+	private Stmt classDeclaration() { //TODO add warning if empty class
+		Token name = consume(IDENTIFIER, "Expected class name");
+		consume(LEFT_BRACE, "Expected '{' before class body");
+		
+		List<Stmt.Function> methods = new ArrayList<>();
+		while(!check(RIGHT_BRACE) && !isAtEnd()) {
+			methods.add(function("method"));
+		}
+		
+		consume(RIGHT_BRACE, "Expected '}' after class body");
+		
+		return new Stmt.Class(name, methods);
+	}
+	
 	private Stmt statement() {
+		if(match(FOR)) return forStatement();
+		if(match(IF)) return ifStatement();
 		if(match(PRINT)) return printStatement();
+		if(match(RETURN)) return returnStatement();
+		if(match(WHILE)) return whileStatement();
+		if(match(LEFT_BRACE)) return new Stmt.Block(block());
 		
 		return expressionStatement();
+	}
+	
+	private Stmt forStatement() {
+		consume(LEFT_PAREN, "Expected '(' after 'for'");
+		
+		Stmt initializer;
+		if(match(SEMICOLON)) {
+			initializer = null;
+		}
+		else if(match(VAR)) {
+			initializer = varDeclaration();
+		}
+		else {
+			initializer = expressionStatement();
+		}
+		
+		Expr condition = null;
+		if(!check(SEMICOLON)) {
+			condition = expression();
+		}
+		consume(SEMICOLON, "Expected ';' after loop condition");
+		
+		Expr increment = null;
+		if(!check(RIGHT_PAREN)) {
+			increment = expression();
+		}
+		consume(RIGHT_PAREN, "Expected ')' after for clauses");
+		
+		Stmt body = statement();
+		
+		if(increment != null) {
+			body = new Stmt.Block(
+				Arrays.asList(body, new Stmt.Expression(increment))
+			);
+		}
+		
+		if(condition == null) condition = new Expr.Literal(true);
+		body = new Stmt.While(condition, body);
+		
+		if(initializer != null) {
+			body = new Stmt.Block(Arrays.asList(initializer, body));
+		}
+		
+		return body;
+	}
+	
+	private Stmt ifStatement() {
+		consume(LEFT_PAREN, "Expected '(' after 'if'");
+		Expr condition = expression();
+		consume(RIGHT_PAREN, "Expected ')' after if condition");
+		
+		Stmt thenBranch = statement();
+		Stmt elseBranch = null;
+		if(match(ELSE)) {
+			elseBranch = statement();
+		}
+		
+		return new Stmt.If(condition, thenBranch, elseBranch);
+	}
+	
+	private Stmt varDeclaration() {
+		Token name = consume(IDENTIFIER, "Expected variable name");
+		
+		Expr initializer = null;
+		if(match(EQUAL)) {
+			initializer = expression();
+		}
+		
+		consume(SEMICOLON, "Expected ';' after variable declaration");
+		return new Stmt.Var(name, initializer);
+	}
+	
+	private Stmt whileStatement() {
+		consume(LEFT_PAREN, "Expected '(' after 'while'");
+		Expr condition = expression();
+		consume(RIGHT_PAREN, "Expected ')' after condition");
+		Stmt body = statement();
+		
+		return new Stmt.While(condition, body);
 	}
 	
 	private Stmt printStatement() {
@@ -39,14 +151,102 @@ public class Parser {
 		return new Stmt.Print(value);
 	}
 	
+	private Stmt returnStatement() {
+		Token keyword = previous();
+		Expr value = null;
+		if(!check(SEMICOLON)) {
+			value = expression();
+		}
+		
+		consume(SEMICOLON, "Expected ';' after return statement");
+		return new Stmt.Return(keyword, value);
+	}
+	
 	private Stmt expressionStatement() {
 		Expr expr = expression();
 		consume(SEMICOLON, "Expected ';' after expression");
 		return new Stmt.Expression(expr);
 	}
 	
+	private Stmt.Function function(String kind){
+		Token name = consume(IDENTIFIER, "Expected " + kind + " name");
+		consume(LEFT_PAREN, "Expected '(' after " + kind + " name");
+		List<Token> parameters = new ArrayList<>();
+		if(!check(RIGHT_PAREN)) {
+			do {
+				if(parameters.size() >= 255) {
+					error(peek(), "Cannot define a function with more than 255 parameters");
+				}
+				
+				parameters.add(consume(IDENTIFIER, "Expected parameter name"));
+			}
+			while (match(COMMA));
+		}
+		consume(RIGHT_PAREN, "Expected ')' after parameters");
+		
+		consume(LEFT_BRACE, "Expected '{' before " + kind + " body");
+		List<Stmt> body = block();
+		return new Stmt.Function(name, parameters, body);
+	}
+	
+	private List<Stmt> block() {
+		List<Stmt> statements = new ArrayList<>();
+		
+		while(!check(RIGHT_BRACE) && !isAtEnd()) {
+			statements.add(declaration());
+		}
+		
+		consume(RIGHT_BRACE, "Expected '}' after block");
+		return statements;
+	}
+	
+	private Expr assignment() {
+		Expr expr = or();
+		
+		if(match(EQUAL)) {
+			Token equals = previous();
+			Expr value = assignment();
+			
+			if(expr instanceof Expr.Variable) {
+				Token name = ((Expr.Variable)expr).name;
+				return new Expr.Assign(name, value);
+			}
+			else if(expr instanceof Expr.Get) {
+				Expr.Get get = (Expr.Get)expr;
+				return new Expr.Set(get.object, get.name, value);
+			}
+			error(equals, "Invalid assignment target");
+		}
+		
+		return expr;
+	}
+	
+	private Expr or() {
+		Expr expr = and();
+		
+		while(match(OR)) {
+			Token operator = previous();
+			Expr right = and();
+			expr = new Expr.Logical(expr, operator, right);
+		}
+		
+		return expr;
+	}
+	
+	private Expr and() {
+		Expr expr = equality();
+		
+		while(match(AND)) {
+			Token operator = previous();
+			Expr right = equality();
+			expr = new Expr.Logical(expr, operator, right);
+		}
+		
+		return expr;
+	}
+	
 	private Expr expression() {
-		return equality();
+		return assignment();
 	}
 	
 	private Expr equality() {
@@ -104,7 +304,42 @@ public class Parser {
 			return new Expr.Unary(operator, right);
 		}
 		
-		return primary();
+		return call();
+	}
+	
+	private Expr finishCall(Expr callee){
+		List <Expr> arguments = new ArrayList<>();
+		if(!check(RIGHT_PAREN)) {
+			do {
+				if(arguments.size() >= 255) {
+					error(peek(), "Cannot call a function with more than 255 arguments");
+				}
+				arguments.add(expression());
+			} while (match(COMMA));
+		}
+		
+		Token paren = consume(RIGHT_PAREN, "Expected ')' after arguments");
+		
+		return new Expr.Call(callee, paren, arguments);
+	}
+	
+	private Expr call() {
+		Expr expr = primary();
+		
+		while(true) {
+			if(match(LEFT_PAREN)) {
+				expr = finishCall(expr);
+			}
+			else if(match(DOT)) {
+				Token name = consume(IDENTIFIER, "Expected property name after '.'");
+				expr = new Expr.Get(expr, name);
+			}
+			else {
+				break;
+			}
+		}
+		
+		return expr;
 	}
 	
 	private Expr primary() {
@@ -114,6 +349,12 @@ public class Parser {
 		
 		if(match(NUMBER, STRING)) {
 			return new Expr.Literal(previous().literal);
+		}
+		
+		if(match(THIS)) return new Expr.This(previous());
+		
+		if(match(IDENTIFIER)) {
+			return new Expr.Variable(previous());
 		}
 		
 		if(match(LEFT_PAREN)) {
@@ -185,6 +426,8 @@ public class Parser {
 				case PRINT:
 				case RETURN:
 					return;
+				default:
+					break;
 			}
 			
 			advance();
